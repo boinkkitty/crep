@@ -1,0 +1,93 @@
+# Local stack: MySQL, Cassandra, Crep's six services (one per container), and an echo target.
+# Usage (from repo root):
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# Schema: MySQL tables come from ./mysql-init on the first start of an empty volume
+# (`down -v` to re-run); Cassandra keyspace/tables are created by Crep on connect.
+x-crep-env: &crep-env
+  CREP_MYSQL_DSN: "crep:crep@tcp(mysql:3306)/crep"
+  CREP_CASSANDRA_HOSTS: "cassandra"
+  CREP_CASSANDRA_KEYSPACE: "crep"
+  # Development-only secrets. Generate real ones with `crep keygen`.
+  CREP_ENCRYPTION_KEYS: "kdev:ZGV2ZGV2ZGV2ZGV2ZGV2ZGV2ZGV2ZGV2ZGV2ZGV2MDA="
+  CREP_JWT_SECRET: "dev-secret-change-me-dev-secret-change-me"
+  # The echo target is on the private compose network; never enable this in production.
+  CREP_ALLOW_PRIVATE_DESTINATIONS: "true"
+  CREP_DENY_CIDRS: "169.254.0.0/16"
+  CREP_ALLOWED_PORTS: "80,443,8080"
+  CREP_ARCHIVE_RETENTION: "2m"
+  CREP_LOG_LEVEL: "info"
+
+# Only `task-api` builds the image; every other service reuses crep:dev (building the
+# same tag once per service in parallel makes the builds collide).
+x-crep: &crep
+  image: crep:dev
+  pull_policy: never
+  environment: *crep-env
+  restart: unless-stopped
+  depends_on:
+    mysql: { condition: service_healthy }
+    cassandra: { condition: service_healthy }
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: crep
+      MYSQL_USER: crep
+      MYSQL_PASSWORD: crep
+      MYSQL_ROOT_PASSWORD: root
+    ports: ["${CREP_MYSQL_HOST_PORT:-3306}:3306"]
+    volumes:
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ucrep", "-pcrep"]
+      interval: 3s
+      retries: 40
+
+  cassandra:
+    image: cassandra:5.0
+    environment:
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    ports: ["${CREP_CASSANDRA_HOST_PORT:-9042}:9042"]
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' >/dev/null 2>&1"]
+      interval: 5s
+      retries: 60
+
+  task-api:
+    <<: *crep
+    build: { context: .., dockerfile: Dockerfile }
+    pull_policy: build
+    command: ["serve", "task-api"]
+    ports: ["8080:8080"]
+
+  job-api:
+    <<: *crep
+    command: ["serve", "job-api"]
+    ports: ["8081:8080"]
+
+  scheduler:
+    <<: *crep
+    command: ["serve", "scheduler"]
+    deploy: { replicas: 2 }
+
+  executor:
+    <<: *crep
+    command: ["serve", "executor"]
+    deploy: { replicas: 3 }
+
+  reconciler:
+    <<: *crep
+    command: ["serve", "reconciler"]
+    ports: ["9090:9090"]
+
+  archiver:
+    <<: *crep
+    command: ["serve", "archiver"]
+
+  echo:
+    image: mendhak/http-https-echo:35
+    environment:
+      HTTP_PORT: 8080
+    ports: ["8090:8080"]

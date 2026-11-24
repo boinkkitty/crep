@@ -1,0 +1,9 @@
+/bin/
+*.test
+*.out
+coverage.*
+deploy/data/
+.env
+.env.*
+.DS_Store
+.claude/settings.local.json
